@@ -628,8 +628,8 @@ int main(void)
 	float angle_scale = 1.0f/16.0f;
 
 	initializeServos();
-	////initializeRotors();	
-	//armRotors();
+	initializeRotors();	
+	armRotors();
 				
 				/*
 				
@@ -753,7 +753,7 @@ int main(void)
 		//nRF_Put_String(String_Data);
 		//nRF_Put_String("\n");
 		
-		//loop_PID();
+		loop_PID();
 			
 		derPitchAng1 = format_print_left(deltapitchAngle);
 		derRollAng1 = format_print_left(derivativerollAngle);
@@ -851,8 +851,6 @@ int main(void)
 		}
 		
 		
-		/*
-		
 		prevpitchAngle = pitchAngle;
 		prevrollAngle = rollAngle;
 		prevyawAngle = yawAngle;
@@ -860,8 +858,6 @@ int main(void)
 		prevSmoothx = SmoothDatax;
 		prevSmoothy = SmoothDatay;
 		
-		
-		*/
 		
 		//armCount = 0;
 		
