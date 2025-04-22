@@ -1,161 +1,146 @@
+/* define CPU frequency in hz here if not defined in Makefile */
+#define F_CPU 7372800UL
 
-#define F_CPU 16000000UL
+/* I2C clock in Hz */
+#define SCL_CLOCK  400000L
 
+#include <inttypes.h>
+#include <compat/twi.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <stdint.h>
+#include <math.h>
+#include <string.h>
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <util/delay.h>
-#include <stdbool.h>
-#include <avr/pgmspace.h>
-#include <util/twi.h>
-#include <math.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include "mpu6050_reg.h"
+#include "i2cmaster.h"
+#include "Test_BNO055.h"
 
 #define PI 3.14159265
 
-#define TWISendStart()		(TWCR = (1<<TWINT)|(1<<TWSTA)|(1<<TWEN))
-#define TWISendStop()		(TWCR = (1<<TWINT)|(1<<TWSTO)|(1<<TWEN))
-#define TWISendTransmit()	(TWCR = (1<<TWINT)|(1<<TWEN))
-#define TWISendACK()		(TWCR = (1<<TWINT)|(1<<TWEN)|(1<<TWEA))
-#define TWISendNACK()		(TWCR = (1<<TWINT)|(1<<TWEN))
+char pitchChar[28];
+char rollChar[28];
+char yawChar[28];
+char accelChar[28];
+char pwmChar[28];
 
-#define TWI_FREQ 12 // TWI bit rate
-#define NO_PRESCALING 0
-#define TWI_STATUS	(TWSR & 0xF8) // Get TWI status
-#define TXMAXBUFLEN 16 // Transmit buffer length
-#define RXMAXBUFLEN 16 // Receive buffer length
+double pitchf1, pitchf2, rollf1, rollf2, yawf1, yawf2, dyawf1, dyawf2, ryawf1, ryawf2;
+int pitchi1, pitchi2, rolli1, rolli2, yawi1, yawi2, dyawi1, dyawi2, ryawi1, ryawi2,pidrolli1,pidrolli2;
 
 #define USART_BAUDRATE 9600
 #define BAUD_PRESCALER (((F_CPU / (USART_BAUDRATE * 16UL))) - 1)
 
-volatile uint8_t TWITransmitBuffer[TXMAXBUFLEN]; // Global transmit buffer
-volatile uint8_t TWIReceiveBuffer[RXMAXBUFLEN]; // Global receive buffer
+volatile uint8_t buffer[14];
 
-volatile int TXBuffIndex; // Index of the transmit buffer. Is volatile, can change at any time.
-volatile int RXBuffIndex; // Current index in the receive buffer
+int pwmMin = 920;
+int pwmMinPlus = 960;
+int pwmMax = 1840;
+int pwmOff = 0;
+volatile int pwmMotA = 1100;
+volatile int pwmMotB = 1100;
+volatile int targetpwmMotA = 1100;
+volatile int targetpwmMotB = 1100;
 
-int TXBuffLen; // The total length of the transmit buffer
-int RXBuffLen; // The total number of bytes to read (should be less than RXMAXBUFFLEN)
+float rollAngle = 0.0f;
+float pitchAngle = 0.0f;
+float yawAngle = 0.0f;
 
-int16_t ACCEL_XOUT;
-int16_t ACCEL_YOUT;
-int16_t ACCEL_ZOUT;
+float prevrollAngle = 0.0f;
+float prevpitchAngle = 0.0f;
+float prevyawAngle = 0.0f;
 
-int16_t ACCEL_XOUT_OFFSET;
-int16_t ACCEL_YOUT_OFFSET;
-int16_t ACCEL_ZOUT_OFFSET;
+double deltarollAngle = 0.0f;
+double deltapitchAngle = 0.0f;
+double deltayawAngle = 0.0f;
 
-int16_t ACCEL_XOUT_VALUE;
-int16_t ACCEL_YOUT_VALUE;
-int16_t ACCEL_ZOUT_VALUE;
+double targetrollAngle = 0.0f;
+double targetpitchAngle = 0.0f;
+double targetyawAngle = 0.0f;
 
-uint8_t ACCEL_XOUT_L;
-uint8_t ACCEL_XOUT_H;
-uint8_t ACCEL_YOUT_L;
-uint8_t ACCEL_YOUT_H;
-uint8_t ACCEL_ZOUT_L;
-uint8_t ACCEL_ZOUT_H;
+double proportionalrollAngle = 0.0f;
+double proportionalpitchAngle = 0.0f;
+double proportionalyawAngle = 0.0f;
 
-float GYRO_XOUT_OFFSET;
-float GYRO_YOUT_OFFSET;
-float GYRO_ZOUT_OFFSET;
+double integralrollAngle = 0.0f;
+double integralpitchAngle = 0.0f;
+double integralyawAngle = 0.0f;
 
-uint8_t GYRO_XOUT_L;
-uint8_t GYRO_XOUT_H;
-uint8_t GYRO_YOUT_L;
-uint8_t GYRO_YOUT_H;
-uint8_t GYRO_ZOUT_L;
-uint8_t GYRO_ZOUT_H;
+double derivativerollAngle = 0.0f;
+double derivativepitchAngle = 0.0f;
+double derivativeyawAngle = 0.0f;
 
-int GYRO_XOUT;
-int GYRO_YOUT;
-int GYRO_ZOUT;
+int derRollAng1 = 0;
+int derPitchAng1 = 0;
+int derYawAng1 = 0;
 
-float dt = 0.05f;
+int derRollAng2 = 0;
+int derPitchAng2 = 0;
+int derYawAng2 = 0;
 
-float GYRO_XANGLE;
-float GYRO_YANGLE;
-float GYRO_ZANGLE;
+int proRollAng1 = 0;
+int proPitchAng1 = 0;
+int proYawAng1 = 0;
 
-#define POLE_OFF			0b00000000
+int proRollAng2 = 0;
+int proPitchAng2 = 0;
+int proYawAng2 = 0;
 
-#define POLE_POS_NORTH		0b00000011
-#define POLE_POS_NORTHEAST	0b00000010
-#define POLE_POS_EAST		0b00000110
-#define POLE_POS_SOUTHEAST	0b00000100
+double pidRollThreshold = 0.0f;
+double pidPitchThreshold = 0.0f;
+double pidYawThreshold = 0.0f;
 
-#define POLE_POS_SOUTH		0b00001100
-#define POLE_POS_SOUTHWEST	0b00001000
-#define POLE_POS_WEST		0b00001001
-#define POLE_POS_NORTHWEST	0b00000001
+double tunepitchP = 1.0f;
+double tunepitchI = 0.0f;
+double tunepitchD = 1.0f;
 
-#define POLE_POS_NORTH2		0b00001100
-#define POLE_POS_EAST2		0b00011000
-#define POLE_POS_SOUTH2		0b10010000
-#define POLE_POS_WEST2		0b10000100
-		
-typedef struct struct_compass{
-	uint8_t orient;
-	struct struct_compass* prev;
-	struct struct_compass* next;
-} struct_compass;
+double tunerollP = 1.0f;
+double tunerollI = 0.0f;
+double tunerollD = 1.0f;
 
-struct_compass *NODE_NEEDLE, NODE_NORTH, NODE_NORTHEAST, NODE_EAST, NODE_SOUTHEAST, NODE_SOUTH, NODE_SOUTHWEST, NODE_WEST, NODE_NORTHWEST, NODE_OFF;
-struct_compass *NODE_NEEDLE2, NODE_NORTH2, NODE_EAST2, NODE_SOUTH2, NODE_WEST2;
+float pidpitchAngle = 0.0f;
+float pidrollAngle = 0.0f;
+float pidyawAngle = 0.0f;
 
-int stepper_turning = 0;
-int turnThreshold = 0;
-bool turning = false;
-	
-float targetYAngle = 0.0;
-float yProportional = 0.0;
-float pidThreshold = 0.0;
-int delayTime = 1;
+volatile int ovr = 0;
+//volatile int pwm1 = 742;
+//volatile int pwm2 = 738;
 
-bool timer2tick = false;
+volatile int pwm1 = 738;
+volatile int pwm2 = 736;
 
-char accelChar[28];
-char gyroChar[28];
-char dgyroChar[28];
+volatile int targetpwmServoA = 738;
+volatile int targetpwmServoB = 736;
 
 char c;
-int accelxint, accelyint, accelzint;
 
-double accelxf1, accelxf2, accelyf1, accelyf2, accelzf1, accelzf2;
-int accelxi1, accelxi2, accelyi1, accelyi2, accelzi1, accelzi2;
+int RawDatax,RawDatay,RawDataPitch;
+float SmoothDatax,SmoothDatay, SmoothDataPitch;
+float prevSmoothy,prevSmoothx,derSmoothx,derSmoothy = 0;
+float LPF_Beta = 0.15; // 0<ß<1
 
-double pitchf1, pitchf2, rollf1, rollf2, yawf1, yawf2;
-int pitchi1, pitchi2, rolli1, rolli2, yawi1, yawi2;
+volatile int pidCount = 0;
+volatile int armCount = 0;
 
-double dpitchf1, dpitchf2, drollf1, drollf2, dyawf1, dyawf2;
-int dpitchi1, dpitchi2, drolli1, drolli2, dyawi1, dyawi2;
+int derSumCounter = 0;
+int derSumLimit = 1;
+double derRollArr[2];
+double derRollQsum = 0;
 
-int pwmMin = 0x07D0;
-int pwmMax = 0x0F9F;
-int pwmOff = 0x0000;
-int pwmMotA = 2200;
-int pwmMotB = 2200;
+int rollIntQSumCounter = 0;
+int rollIntQSumLimit = 99;
+double rollIntQArr[100];
+double rollIntQsum = 0;
 
-float rollAngle = 0.0;
-float pitchAngle = 0.0;
-float yawAngle = 0.0;
+int yawIntQSumCounter = 0;
+int yawIntQSumLimit = 3;
+double yawIntQArr[4];
+double yawIntQsum = 0;
 
-float prevrollAngle = 0.0;
-float prevpitchAngle = 0.0;
-float prevyawAngle = 0.0;
-
-float deltarollAngle = 0.0;
-float deltapitchAngle = 0.0;
-float deltayawAngle = 0.0;
-
-bool keepTurning = false;
-int stepperMotorTurn = 0;
-int stepperMotor2Turn = 0;
+bool derresetter = false;
+bool intresetter = false;
 
 void USART_init(void){
-	
 	UBRR0H = (uint8_t)(BAUD_PRESCALER>>8);
 	UBRR0L = (uint8_t)(BAUD_PRESCALER);
 	UCSR0B = (1<<RXEN0)|(1<<TXEN0);
@@ -190,302 +175,185 @@ char hc_05_bluetooth_receive_byte(void)
 
 
 
+/*************************************************************************
+ Initialization of the I2C bus interface. Need to be called only once
+*************************************************************************/
+void i2c_init(void)
+{
+  /* initialize TWI clock: 100 kHz clock, TWPS = 0 => prescaler = 1 */
+  
+  TWSR = 0;                         /* no prescaler */
+  TWBR = ((F_CPU/SCL_CLOCK)-16)/2;  /* must be > 10 for stable operation */
+
+}/* i2c_init */
+
+
+/*************************************************************************	
+  Issues a start condition and sends address and transfer direction.
+  return 0 = device accessible, 1= failed to access device
+*************************************************************************/
+unsigned char i2c_start(unsigned char address)
+{
+    uint8_t   twst;
+
+	// send START condition
+	TWCR = (1<<TWINT) | (1<<TWSTA) | (1<<TWEN);
+
+	// wait until transmission completed
+	while(!(TWCR & (1<<TWINT)));
+
+	// check value of TWI Status Register. Mask prescaler bits.
+	twst = TW_STATUS & 0xF8;
+	if ( (twst != TW_START) && (twst != TW_REP_START)) return 1;
+
+	// send device address
+	TWDR = address;
+	TWCR = (1<<TWINT) | (1<<TWEN);
+
+	// wail until transmission completed and ACK/NACK has been received
+	while(!(TWCR & (1<<TWINT)));
+
+	// check value of TWI Status Register. Mask prescaler bits.
+	twst = TW_STATUS & 0xF8;
+	if ( (twst != TW_MT_SLA_ACK) && (twst != TW_MR_SLA_ACK) ) return 1;
+
+	return 0;
+
+}/* i2c_start */
+
+
+/*************************************************************************
+ Issues a start condition and sends address and transfer direction.
+ If device is busy, use ack polling to wait until device is ready
+ 
+ Input:   address and transfer direction of I2C device
+*************************************************************************/
+void i2c_start_wait(unsigned char address)
+{
+    uint8_t   twst;
+
+
+    while ( 1 )
+    {
+	    // send START condition
+	    TWCR = (1<<TWINT) | (1<<TWSTA) | (1<<TWEN);
+    
+    	// wait until transmission completed
+    	while(!(TWCR & (1<<TWINT)));
+    
+    	// check value of TWI Status Register. Mask prescaler bits.
+    	twst = TW_STATUS & 0xF8;
+    	if ( (twst != TW_START) && (twst != TW_REP_START)) continue;
+    
+    	// send device address
+    	TWDR = address;
+    	TWCR = (1<<TWINT) | (1<<TWEN);
+    
+    	// wail until transmission completed
+    	while(!(TWCR & (1<<TWINT)));
+    
+    	// check value of TWI Status Register. Mask prescaler bits.
+    	twst = TW_STATUS & 0xF8;
+    	if ( (twst == TW_MT_SLA_NACK )||(twst ==TW_MR_DATA_NACK) ) 
+    	{    	    
+    	    /* device busy, send stop condition to terminate write operation */
+	        TWCR = (1<<TWINT) | (1<<TWEN) | (1<<TWSTO);
+	        
+	        // wait until stop condition is executed and bus released
+	        while(TWCR & (1<<TWSTO));
+	        
+    	    continue;
+    	}
+    	//if( twst != TW_MT_SLA_ACK) return 1;
+    	break;
+     }
+
+}/* i2c_start_wait */
+
+
+/*************************************************************************
+ Issues a repeated start condition and sends address and transfer direction 
+
+ Input:   address and transfer direction of I2C device
+ 
+ Return:  0 device accessible
+          1 failed to access device
+*************************************************************************/
+unsigned char i2c_rep_start(unsigned char address)
+{
+    return i2c_start( address );
+
+}/* i2c_rep_start */
+
+
+/*************************************************************************
+ Terminates the data transfer and releases the I2C bus
+*************************************************************************/
+void i2c_stop(void)
+{
+    /* send stop condition */
+	TWCR = (1<<TWINT) | (1<<TWEN) | (1<<TWSTO);
+	
+	// wait until stop condition is executed and bus released
+	while(TWCR & (1<<TWSTO));
+
+}/* i2c_stop */
+
+
+/*************************************************************************
+  Send one byte to I2C device
+  
+  Input:    byte to be transfered
+  Return:   0 write successful 
+            1 write failed
+*************************************************************************/
+unsigned char i2c_write( unsigned char data )
+{	
+    uint8_t   twst;
+    
+	// send data to the previously addressed device
+	TWDR = data;
+	TWCR = (1<<TWINT) | (1<<TWEN);
+
+	// wait until transmission completed
+	while(!(TWCR & (1<<TWINT)));
+
+	// check value of TWI Status Register. Mask prescaler bits
+	twst = TW_STATUS & 0xF8;
+	if( twst != TW_MT_DATA_ACK) return 1;
+	return 0;
+
+}/* i2c_write */
+
+
+/*************************************************************************
+ Read one byte from the I2C device, request more data from device 
+ 
+ Return:  byte read from I2C device
+*************************************************************************/
 unsigned char i2c_readAck(void)
 {
-	TWISendACK();
-	while(!(TWCR & (1<<TWINT))){_delay_us(1);}
-	return TWDR;
-}
+	TWCR = (1<<TWINT) | (1<<TWEN) | (1<<TWEA);
+	while(!(TWCR & (1<<TWINT)));    
 
+    return TWDR;
+
+}/* i2c_readAck */
+
+
+/*************************************************************************
+ Read one byte from the I2C device, read is followed by a stop condition 
+ 
+ Return:  byte read from I2C device
+*************************************************************************/
 unsigned char i2c_readNak(void)
 {
-	TWISendNACK();
-	while(!(TWCR & (1<<TWINT))){_delay_us(1);}
-	return TWDR;
-}
-
-void i2c_start(unsigned char address)
-{
-	TWISendStart();
-	while(!(TWCR & (1<<TWINT))){_delay_us(1);}
+	TWCR = (1<<TWINT) | (1<<TWEN);
+	while(!(TWCR & (1<<TWINT)));
 	
-	TWDR = address;
-	TWISendTransmit();
-	while(!(TWCR & (1<<TWINT))){_delay_us(1);}
-}
+    return TWDR;
 
-void i2c_write( unsigned char data )
-{
-	TWDR = data;
-	TWISendTransmit();
-	while(!(TWCR & (1<<TWINT))){_delay_us(1);}
-}
-
-void TWIInit()
-{
-	TWSR = NO_PRESCALING;
-	TWBR = (F_CPU /(16 + TWI_FREQ*2));
-	TWCR = (1<<TWEN);
-}
-
-uint8_t mpu6050_readBytes(uint8_t regAddr, uint8_t length) {
-	uint8_t i = 0;
-	
-	if(length > 0) {
-		
-		i2c_start(MPU6050_ADDR|I2C_WRITE);
-		_delay_us(1);
-		i2c_write(regAddr); //request register
-		_delay_us(1);
-		i2c_start(MPU6050_ADDR|I2C_READ); //read data
-		_delay_us(1);
-		
-		for(i=0; i<length; i++) {
-			if(i==length-1)
-			{
-				TWIReceiveBuffer[i] = i2c_readNak();
-				_delay_us(1);
-			}
-			else {
-				TWIReceiveBuffer[i] = i2c_readAck();
-				_delay_us(1);
-			}
-		}
-		TWISendStop();
-	}
-	return TWIReceiveBuffer[0];
-}
-
-int8_t mpu6050_readBits(uint8_t regAddr, uint8_t bitStart, uint8_t length) {
-    // 01101001 read byte
-    // 76543210 bit numbers
-    //    xxx   args: bitStart=4, length=3
-    //    010   masked
-    //   -> 010 shifted
-    int8_t count = 0;
-    uint8_t b = 0;
-	
-    if(length > 0) {
-		if ((count = mpu6050_readBytes(regAddr, 1)) != 0) {
-			uint8_t mask = ((1 << length) - 1) << (bitStart - length + 1);
-			b &= mask;
-			b >>= (bitStart - length + 1);
-		}
-    }
-    return b;
-}
-
-void mpu6050_writeBytes(uint8_t regAddr, uint8_t length, uint8_t* data) {
-	if(length > 0) {
-		//write data
-		i2c_start(MPU6050_ADDR|I2C_WRITE);
-		_delay_us(1);
-		i2c_write(regAddr);
-		_delay_us(1);
-		for (uint8_t i = 0; i < length; i++) {
-			i2c_write((uint8_t) data[i]);
-			_delay_us(1);
-		}
-		TWISendStop();
-	}
-}
-
-void mpu6050_writeData(uint8_t regAddr, uint8_t byteData) {
-	i2c_start(MPU6050_ADDR | I2C_WRITE);
-	_delay_us(1);
-	i2c_write(regAddr);
-	_delay_us(1);
-	i2c_write((uint8_t) byteData);
-	_delay_us(1);
-	TWISendStop();
-}
-
-void mpu6050_testConnection(){
-	mpu6050_readBytes(MPU6050_RA_WHO_AM_I, 1);
-} 
-
-void mpu6050_initialize(){
-	
-	mpu6050_writeData(MPU6050_RA_SMPLRT_DIV, 0x07);					//Sets sample rate to 8000/1+7 = 1000Hz
-	mpu6050_writeData(MPU6050_RA_CONFIG, 0x00);						//Disable FSync, 256Hz DLPF
-	mpu6050_writeData(MPU6050_RA_GYRO_CONFIG, 0x08);			//Disable gyro self tests, scale of 500 degrees/s
-	mpu6050_writeData(MPU6050_RA_ACCEL_CONFIG, 0x00);				//Disable acceleration self tests, scale of +-2g, no DHPF
-	mpu6050_writeData(MPU6050_RA_FF_THR, 0x00);						//Free fall threshold of |0mg|
-	mpu6050_writeData(MPU6050_RA_FF_DUR, 0x00);						//Free fall duration limit of 0
-	mpu6050_writeData(MPU6050_RA_MOT_THR, 0x00);					//Motion threshold of 0mg
-	mpu6050_writeData(MPU6050_RA_MOT_DUR, 0x00);					//Motion duration of 0s
-	mpu6050_writeData(MPU6050_RA_ZRMOT_THR, 0x00);					//Zero motion threshold
-	mpu6050_writeData(MPU6050_RA_ZRMOT_DUR, 0x00);					//Zero motion duration threshold
-	mpu6050_writeData(MPU6050_RA_FIFO_EN, 0x00);					//Disable sensor output to FIFO buffer
-	
-	//AUX I2C setup
-	//Sets AUX I2C to single master control, plus other config
-	mpu6050_writeData(MPU6050_RA_I2C_MST_CTRL, 0x00);
-	
-	//disable sleep mode
-	mpu6050_writeData(MPU6050_RA_PWR_MGMT_1, 0x00);
-
-	//Setup AUX I2C slaves
-	mpu6050_writeData(MPU6050_RA_I2C_SLV0_ADDR, 0x00);
-	mpu6050_writeData(MPU6050_RA_I2C_SLV0_REG, 0x00);
-	mpu6050_writeData(MPU6050_RA_I2C_SLV0_CTRL, 0x00);
-	mpu6050_writeData(MPU6050_RA_I2C_SLV1_ADDR, 0x00);
-	mpu6050_writeData(MPU6050_RA_I2C_SLV1_REG, 0x00);
-	mpu6050_writeData(MPU6050_RA_I2C_SLV1_CTRL, 0x00);
-	mpu6050_writeData(MPU6050_RA_I2C_SLV2_ADDR, 0x00);
-	mpu6050_writeData(MPU6050_RA_I2C_SLV2_REG, 0x00);
-	mpu6050_writeData(MPU6050_RA_I2C_SLV2_CTRL, 0x00);
-	mpu6050_writeData(MPU6050_RA_I2C_SLV3_ADDR, 0x00);
-	mpu6050_writeData(MPU6050_RA_I2C_SLV3_REG, 0x00);
-	mpu6050_writeData(MPU6050_RA_I2C_SLV3_CTRL, 0x00);
-	mpu6050_writeData(MPU6050_RA_I2C_SLV4_ADDR, 0x00);
-	mpu6050_writeData(MPU6050_RA_I2C_SLV4_REG, 0x00);
-	mpu6050_writeData(MPU6050_RA_I2C_SLV4_DO, 0x00);
-	mpu6050_writeData(MPU6050_RA_I2C_SLV4_CTRL, 0x00);
-	mpu6050_writeData(MPU6050_RA_I2C_SLV4_DI, 0x00);
-	
-	//MPU6050_RA_I2C_MST_STATUS //Read-only
-	//Setup INT pin and AUX I2C pass through
-	mpu6050_writeData(MPU6050_RA_INT_PIN_CFG, 0x00);
-	
-	//Enable data ready interrupt
-	mpu6050_writeData(MPU6050_RA_INT_ENABLE, 0x00);
-	
-	//Slave Output
-	mpu6050_writeData(MPU6050_RA_I2C_SLV0_DO, 0x00);
-	mpu6050_writeData(MPU6050_RA_I2C_SLV1_DO, 0x00);
-	mpu6050_writeData(MPU6050_RA_I2C_SLV2_DO, 0x00);
-	mpu6050_writeData(MPU6050_RA_I2C_SLV3_DO, 0x00);
-	
-	//More slave config
-	mpu6050_writeData(MPU6050_RA_I2C_MST_DELAY_CTRL, 0x00);
-	
-	//Reset sensor signal paths
-	mpu6050_writeData(MPU6050_RA_SIGNAL_PATH_RESET, 0x00);
-	
-	//Motion detection control
-	mpu6050_writeData(MPU6050_RA_MOT_DETECT_CTRL, 0x00);
-	
-	//Disables FIFO, AUX I2C, FIFO and I2C reset bits to 0
-	mpu6050_writeData(MPU6050_RA_USER_CTRL, 0x00);
-	
-	//Sets clock source to gyro reference w/ PLL
-	mpu6050_writeData(MPU6050_RA_PWR_MGMT_1, 0x02);
-	
-	//Controls frequency of wake-ups in acceleration low power mode plus the sensor standby modes
-	mpu6050_writeData(MPU6050_RA_PWR_MGMT_2, 0x00);
-	
-	//Data transfer to and from the FIFO buffer
-	mpu6050_writeData(MPU6050_RA_FIFO_R_W, 0x00);
-}
-
-void mpu6050_getAccel(){
-	ACCEL_XOUT_H = mpu6050_readBytes(MPU6050_RA_ACCEL_XOUT_H,1);
-	ACCEL_XOUT_L = mpu6050_readBytes(MPU6050_RA_ACCEL_XOUT_L,1);
-	ACCEL_YOUT_H = mpu6050_readBytes(MPU6050_RA_ACCEL_YOUT_H,1);
-	ACCEL_YOUT_L = mpu6050_readBytes(MPU6050_RA_ACCEL_YOUT_L,1);
-	ACCEL_ZOUT_H = mpu6050_readBytes(MPU6050_RA_ACCEL_ZOUT_H,1);
-	ACCEL_ZOUT_L = mpu6050_readBytes(MPU6050_RA_ACCEL_ZOUT_L,1);
-
-	ACCEL_XOUT = (((int16_t)ACCEL_XOUT_H << 8) | ACCEL_XOUT_L);
-	ACCEL_YOUT = (((int16_t)ACCEL_YOUT_H << 8) | ACCEL_YOUT_L);
-	ACCEL_ZOUT = (((int16_t)ACCEL_ZOUT_H << 8) | ACCEL_ZOUT_L);
-}
-
-void mpu6050_calibrateAccel(){
-	
-	int16_t ACCEL_XOUT_OFFSET_1000SUM = 0;
-	int16_t ACCEL_YOUT_OFFSET_1000SUM = 0;
-	int16_t ACCEL_ZOUT_OFFSET_1000SUM = 0;
-	
-	for (int i = 0; i < 1000; i++){
-		
-		mpu6050_getAccel();
-		ACCEL_XOUT_OFFSET_1000SUM += ACCEL_XOUT;
-		ACCEL_YOUT_OFFSET_1000SUM += ACCEL_YOUT;
-		ACCEL_ZOUT_OFFSET_1000SUM += ACCEL_ZOUT - 16384;
-		_delay_ms(1);
-	}
-	
-	ACCEL_XOUT_OFFSET = (int16_t) floor(ACCEL_XOUT_OFFSET_1000SUM / 1000);
-	ACCEL_YOUT_OFFSET = (int16_t) floor(ACCEL_YOUT_OFFSET_1000SUM / 1000);
-	ACCEL_ZOUT_OFFSET = (int16_t) floor(ACCEL_ZOUT_OFFSET_1000SUM / 1000);
-}
-
-void mpu6050_readAccel(){
-	mpu6050_getAccel();
-	ACCEL_XOUT_VALUE = (ACCEL_XOUT-ACCEL_XOUT_OFFSET);///16384;
-	ACCEL_YOUT_VALUE = (ACCEL_YOUT-ACCEL_YOUT_OFFSET);///16384;
-	ACCEL_ZOUT_VALUE = (ACCEL_ZOUT-ACCEL_ZOUT_OFFSET);///16384;
-}
-
-void mpu6050_getGyroRates()
-{
-	GYRO_XOUT_H = mpu6050_readBytes(MPU6050_RA_GYRO_XOUT_H, 1);
-	GYRO_XOUT_L = mpu6050_readBytes(MPU6050_RA_GYRO_XOUT_L, 1);
-	GYRO_YOUT_H = mpu6050_readBytes(MPU6050_RA_GYRO_YOUT_H, 1);
-	GYRO_YOUT_L = mpu6050_readBytes(MPU6050_RA_GYRO_YOUT_L, 1);
-	GYRO_ZOUT_H = mpu6050_readBytes(MPU6050_RA_GYRO_ZOUT_H, 1);
-	GYRO_ZOUT_L = mpu6050_readBytes(MPU6050_RA_GYRO_ZOUT_L, 1);
-
-	GYRO_XOUT = (((int16_t)GYRO_XOUT_H << 8) | GYRO_XOUT_L);
-	GYRO_YOUT = (((int16_t)GYRO_YOUT_H << 8) | GYRO_YOUT_L);
-	GYRO_ZOUT = (((int16_t)GYRO_ZOUT_H << 8) | GYRO_ZOUT_L);
-}
-
-void mpu6050_calibrateGyros(){
-
-	long GYRO_XOUT_OFFSET_1000SUM = 0;
-	long GYRO_YOUT_OFFSET_1000SUM = 0;
-	long GYRO_ZOUT_OFFSET_1000SUM = 0;
-	
-	for (int i = 0; i < 1000; i++){
-		
-		mpu6050_getGyroRates();
-
-		GYRO_XOUT_OFFSET_1000SUM += GYRO_XOUT;
-		GYRO_YOUT_OFFSET_1000SUM += GYRO_YOUT;
-		GYRO_ZOUT_OFFSET_1000SUM += GYRO_ZOUT;
-
-		_delay_ms(1);
-	}
-
-	GYRO_XOUT_OFFSET = (float) (GYRO_XOUT_OFFSET_1000SUM / 1000);
-	GYRO_YOUT_OFFSET = (float) (GYRO_YOUT_OFFSET_1000SUM / 1000);
-	GYRO_ZOUT_OFFSET = (float) (GYRO_ZOUT_OFFSET_1000SUM / 1000);
-}
-
-void mpu6050_readGyro(){
-	mpu6050_getGyroRates();
-	//GYRO SENSITIVITY AT 65.5 (500 degrees/s)
-	GYRO_XOUT = (float) ((GYRO_XOUT-GYRO_XOUT_OFFSET) / 500);
-	GYRO_YOUT = (float) ((GYRO_YOUT-GYRO_YOUT_OFFSET) / 500);
-	GYRO_ZOUT = (float) ((GYRO_ZOUT-GYRO_ZOUT_OFFSET) / 500);
-
-	GYRO_XANGLE += GYRO_XOUT * dt;
-	GYRO_YANGLE += GYRO_YOUT * dt;
-	GYRO_ZANGLE += GYRO_ZOUT * dt;
-}
-
-void stepper_turnMotor(){
-	uint8_t orientation =  NODE_NEEDLE->orient;
-	PORTC = orientation;
-}
-
-void stepper_stopMotor(){
-	uint8_t orientation =  POLE_OFF;
-	PORTC = orientation;
-}
-
-void stepper_turnMotor2(){
-	uint8_t orientation =  NODE_NEEDLE2->orient;
-	PORTD = orientation;
-}
-
-void stepper_stopMotor2(){
-	uint8_t orientation =  POLE_OFF;
-	PORTD = orientation;
-}
+}/* i2c_readNak */
 
 void initializeRotors(){
 	
@@ -499,35 +367,26 @@ void initializeRotors(){
 	TCCR1B |= (1 << WGM12)|(1 << WGM13) | (1 << CS11);
 	// set Fast PWM mode using ICR1 as TOP prescaler 8
 	
-	ICR1 = 0x9C38;
-	// set TOP to 16bit to 39992 20ms
+	ICR1 = 18400;
 
-	/*
-	OCR1A = 0x07D0;
-	// set PWM for 5% duty cycle @ 16bit (2000) 1 ms
-
-	OCR1B = 0x0F9F;
-	// set PWM for 10% duty cycle @ 16bit (3999) 2 ms
-	*/
-	
 	OCR1A = pwmOff;
 	// set PWM for 10% duty cycle @ 16bit (4000)
 
 	OCR1B = pwmOff;
 	// set PWM for 20% duty cycle @ 16bit (8000)
 
-	_delay_ms(3000);
+	_delay_ms(4000);
 	
 	OCR1A = pwmMax;
 	OCR1B = pwmMax;
 	
-	_delay_ms(6000);
+	_delay_ms(4000);
 	
 	OCR1A = pwmMin;
 	OCR1B = pwmMin;
 	
 	
-	_delay_ms(7000);
+	_delay_ms(6000);
 	
 	OCR1A = pwmOff;
 	OCR1B = pwmOff;
@@ -536,118 +395,214 @@ void initializeRotors(){
 	
 	OCR1A = pwmMotA;
 	OCR1B = pwmMotB;
-	
 }
 
-void timer0_init()
-{
-    TCCR0A |= (1 << WGM01);
-    OCR0A = 0xF9;
-    TIMSK0 |= (1 << OCIE0A);
-    TCCR0B |= (1 << CS01) | (1 << CS00);
-}
+void armRotors(){
+		DDRB |= (1 << DDB1)|(1 << DDB2);
+		// PB1 and PB2 is now an output
 
-void timer1_init()
-{
-	// set up timer with prescaler = 64 and CTC mode
-	TCCR1B |= (1 << WGM12)|(1 << CS11)|(1 << CS10);
+		TCCR1A |= (1 << COM1A1)|(1 << COM1B1);
+		// set none-inverting mode
+
+		TCCR1A |= (1 << WGM11);
+		TCCR1B |= (1 << WGM12)|(1 << WGM13) | (1 << CS11);
+		// set Fast PWM mode using ICR1 as TOP prescaler 8
 		
-	// initialize counter
-	TCNT1 = 0;
+		ICR1 = 18400;
+		// set TOP to 16bit to 20000*0.92 20ms
+
+		OCR1A = pwmOff;
+		OCR1B = pwmOff;
+
+		_delay_ms(1000);
 		
-	// initialize compare value
-	OCR1A = 24999;
+		OCR1A = pwmMax;
+		OCR1B = pwmMax;
 		
-	// enable compare interrupt
-	TIMSK1 |= (1 << OCIE1A);
+		_delay_ms(1000);
+		
+		OCR1A = pwmMin;
+		OCR1B = pwmMin;
+		
+		
+		_delay_ms(2000);
+		
+		OCR1A = pwmOff;
+		OCR1B = pwmOff;
+		
+		_delay_ms(1);
+		
+		OCR1A = pwmMotA;
+		OCR1B = pwmMotB;
 }
 
-// this code sets up timer2 for a 1ms  @ 16Mhz Clock
-void timer2_init()
-{
-	OCR2A = 0xF9;
-	TCCR2A |= (1 << WGM21);
-	TIMSK2 |= (1 << OCIE2A);
-	TCCR2B |= (1 << CS21);
+int format_print_left(double num){
+	return (int) num;
 }
 
-ISR(TIMER2_COMPA_vect)
-{	
-	timer2tick = true;
-}
-
-/*
-ISR(TIMER1_COMPA_vect)
-{
-	// toggle led here
-	timer0count++;
+int format_print_right(double num){
+	double left;
+	double right;
 	
-	if(timer0count > 10){
-		PORTC ^= (1 << 0);
-		timer0count = 0;
-	}
+	left = (int) num;
+	right = fabs(num-left);
+	return (int) 100*right;
 }
 
-ISR (TIMER0_COMPA_vect)
-{
-	//timer0tick = true;
+double sumArray(double value, double* sum, double* arr, int limit, int* counter, bool avg, bool* reset){
+		
+		double result = 0;
+		
+		if(*reset){
+			*sum = 0;
+			
+			for(int i = 0; i <= limit; i++){
+				arr[i] = 0;
+			}
+			
+			 *counter = 0;
+			 *reset = false;
+		}
+		
+		if(*counter < limit){
+			
+			*sum = (double) *sum + value;
+			arr[*counter] = value;
+			
+			if(avg){
+				result = (double) *sum/(*counter+1);
+			} else {
+				result  = (double) *sum;
+			}
+			
+			*counter = *counter + 1;
+			
+		} else {
+			
+			*sum = (double) *sum - arr[0];
+			*sum = (double) *sum + value;
+						
+			for(int i = 0; i < limit; i++){
+				arr[i] = arr[i+1];
+			}
+						
+			arr[limit] = value;
+						
+			if(avg){
+				result = (double) *sum/(*counter);
+			} else {
+				result  = (double) *sum;
+			}
+		}
+		
+		return (double) result;
 }
-*/
 
+void loop_PID(){
 	
+		deltapitchAngle = prevpitchAngle - pitchAngle;
+		deltarollAngle = prevrollAngle - rollAngle;
+		deltayawAngle = prevyawAngle - yawAngle;
+		
+		if(deltayawAngle > 180.0){
+			deltayawAngle = (int) 360.0 - deltayawAngle;
+		} else if(deltayawAngle < -300.0) {
+			deltayawAngle = (int)   -360.0 - deltayawAngle;
+		}
+	
+		proportionalpitchAngle = targetpitchAngle - pitchAngle;
+		proportionalrollAngle = targetrollAngle - rollAngle;
+		proportionalyawAngle = targetyawAngle - yawAngle;
+		
+		if(fabs(proportionalyawAngle) > 180.0){
+			proportionalyawAngle = (180 - fabs(proportionalyawAngle + 180));
+		} else if(proportionalyawAngle < 180.0) {
+			proportionalyawAngle = -1*(180 - fabs(proportionalyawAngle + 180));
+		}
+		
+		integralpitchAngle += proportionalpitchAngle;
+		integralrollAngle += proportionalrollAngle;
+		//integralyawAngle = sumArray(deltayawAngle, &yawIntQsum, yawIntQArr, yawIntQSumLimit, &yawIntQSumCounter, false, &intresetter);
+		
+		//integralyawAngle += deltayawAngle; ///(1 + exp((180 - fabs(proportionalyawAngle + 180))/3  - 6));//deltayawAngle/4;
+		
+		
+		
+			
+			
+			
+		//derivativerollAngle = sumArray(deltarollAngle, &derRollQsum, derRollArr, derSumLimit, &derSumCounter, true, &derresetter);
+		//integralrollAngle = (fabs(proportionalrollAngle)*sumArray(proportionalrollAngle, &rollIntQsum, rollIntQArr, rollIntQSumLimit, &rollIntQSumCounter, false, &intresetter))/500;
+		 
+		
+		pidPitchThreshold = (int) proportionalpitchAngle/3;
+		
+		pidPitchThreshold = (pidPitchThreshold > 20.0) ? 20.0 : pidPitchThreshold;
+		pidPitchThreshold = (pidPitchThreshold < -20.0) ? -20.0 : pidPitchThreshold;
+		
+		/*
+		pwm1 = targetpwmServoA - pidPitchThreshold;
+		pwm2 = targetpwmServoB + pidPitchThreshold;
+		*/
+		
+		//pidRollThreshold = (proportionalrollAngle)*(1/(1+exp((-1*fabs(proportionalrollAngle/derivativerollAngle)+6))));// + integralrollAngle;// - derivativerollAngle;// *(1/(1+fabs(derivativerollAngle)));// - derivativerollAngle;// + integralrollAngle - derivativerollAngle;// + proportionalrollAngle*integralrollAngle/500;// + 10*derivativerollAngle + proportionalrollAngle*integralrollAngle/500;
+		//pidRollThreshold = (proportionalrollAngle + derivativerollAngle)*(1/(1+exp(-3*fabs(proportionalrollAngle/derivativerollAngle)+6)));// + integralrollAngle;
+		
+		pidRollThreshold = proportionalrollAngle*8 + deltarollAngle*34 + integralrollAngle/128; //*(1/(1+exp((-1*fabs(proportionalrollAngle*2/(deltarollAngle+1))+12)))) ;
+		
+		
+		
+		//pidYawThreshold = (int) proportionalyawAngle/6; // proportionalyawAngle/6 + deltayawAngle;// integralyawAngle;
+		
+		
+		
+		//pidYawThreshold = integralyawAngle/(1 + exp(-1*fabs(2*deltayawAngle) + 6));
+		
+	
+		/*
+		pwm1 = (int) pwm1 - pidYawThreshold;
+		pwm2 = (int) pwm2 - pidYawThreshold;
+		
+		pwm1 = targetpwmServoA - pidYawThreshold;
+		pwm2 = targetpwmServoB - pidYawThreshold;
+		*/
+		
+		pwmMotA = (int) targetpwmMotA - pidRollThreshold;
+		pwmMotB = (int) targetpwmMotB + pidRollThreshold;
+		
+		pwmMotA = (pwmMotA > pwmMax) ? pwmMax : pwmMotA;
+		pwmMotA = (pwmMotA < pwmMinPlus) ? pwmMinPlus : pwmMotA;
+		
+		pwmMotB = (pwmMotB > pwmMax) ? pwmMax : pwmMotB;
+		pwmMotB = (pwmMotB < pwmMinPlus) ? pwmMinPlus : pwmMotB;
+		
+		OCR1A = pwmMotA;
+		OCR1B = pwmMotB;
+		
+}
+
+void initializeServos(){
+		DDRD |= (1 << DDD6) | (1 << DDD5);
+		// PD6 is now an output
+
+		OCR2A = 184;
+
+		TCCR2A |= (1 << WGM21);
+		// Set to CTC Mode
+
+		TIMSK2 |= (1 << OCIE2A);
+		//Set interrupt on compare match
+
+		TCCR2B |= (0 << CS22) | (0 << CS21) | (1 << CS20);
+		// set prescaler to 8 and starts timer
+		
+		GTCCR = (1<<PSRASY) | (1<<PSRSYNC);
+}
+
 int main(void)
 {
 	sei();
-	/*
-	NODE_NORTH.orient = POLE_POS_NORTH;
-	NODE_NORTH.prev = &NODE_WEST;
-	NODE_NORTH.next = &NODE_EAST;
-
-	NODE_EAST.orient = POLE_POS_EAST;
-	NODE_EAST.prev = &NODE_NORTH;
-	NODE_EAST.next = &NODE_SOUTH;
-
-	NODE_SOUTH.orient = POLE_POS_SOUTH;
-	NODE_SOUTH.prev = &NODE_EAST;
-	NODE_SOUTH.next = &NODE_WEST;
-
-	NODE_WEST.orient = POLE_POS_WEST;
-	NODE_WEST.prev = &NODE_SOUTH;
-	NODE_WEST.next = &NODE_NORTH;
-		
-	NODE_NEEDLE = &NODE_NORTH;
-
-	NODE_NORTH2.orient = POLE_POS_NORTH2;
-	NODE_NORTH2.prev = &NODE_WEST2;
-	NODE_NORTH2.next = &NODE_EAST2;
-
-	NODE_EAST2.orient = POLE_POS_EAST2;
-	NODE_EAST2.prev = &NODE_NORTH2;
-	NODE_EAST2.next = &NODE_SOUTH2;
-
-	NODE_SOUTH2.orient = POLE_POS_SOUTH2;
-	NODE_SOUTH2.prev = &NODE_EAST2;
-	NODE_SOUTH2.next = &NODE_WEST2;
-
-	NODE_WEST2.orient = POLE_POS_WEST2;
-	NODE_WEST2.prev = &NODE_SOUTH2;
-	NODE_WEST2.next = &NODE_NORTH2;
-	
-	NODE_NEEDLE2 = &NODE_NORTH2;
-	*/
-	
-	USART_init();
-	TWIInit();
-	mpu6050_testConnection();
-	mpu6050_initialize();
-	mpu6050_calibrateAccel();
-	mpu6050_calibrateGyros();
-	
-	
-	// initialize timer
-	//timer0_init();
-	DDRB |= (1 << 3);
-	PORTB = 0x00;
+	_delay_ms(1500);
 	
 	DDRC = 0x0F;    // Enable output on all of the C pins
 	PORTC = 0x00;            // Set them all to 0v
@@ -655,190 +610,283 @@ int main(void)
 	DDRD = 0xFF;    // Enable output on all of the C pins
 	PORTD = 0x00;            // Set them all to 0v
 	
+	//AVR_Init();
+	USART_init();
+	i2c_init();
 	
-	PORTB |= (1<<3);
-	_delay_ms(500);
-	PORTB &= ~(1<<3);
+	//Init_SPI();
+	//Init_nrf();
 	
-	//initializeRotors();
+	unsigned char Euler_Raw_LSB;
+	unsigned char Euler_Raw_MSB;
 	
-	timer2_init();
-	
+	unsigned char Linear_Raw_LSBx;
+	unsigned char Linear_Raw_MSBx;
+	unsigned char Linear_Raw_LSBy;
+	unsigned char Linear_Raw_MSBy;
+
+	float angle_scale = 1.0f/16.0f;
+
+	initializeServos();
+	////initializeRotors();	
+	//armRotors();
+				
+				/*
+				
+				i2c_start_wait(BNO055_ADDRESS|I2C_WRITE);	//Set device address and read mode
+				i2c_write(BNO055_OPR_MODE_ADDR);
+				i2c_write(OPERATION_MODE_IMUPLUS);		//Set operation mode to IMU
+				i2c_stop();
+				
+				*/
+				
+				//_delay_ms(10);
+				
+				
+	//Endless Loop
 	while(1)
 	{
 		
-		if(timer2tick == true){
+		
+		i2c_start_wait(BNO055_ADDRESS|I2C_WRITE);	//Set device address and read mode
+		i2c_write(BNO055_EULER_H_LSB_ADDR);		//Access LSB of Heading Euler angle
+		i2c_rep_start(BNO055_ADDRESS | I2C_READ);		//Set device address and read mode
+		Euler_Raw_LSB = i2c_readNak();
+		i2c_stop();
+
+		i2c_start_wait(BNO055_ADDRESS|I2C_WRITE);	//Set device address and read mode
+		i2c_write(BNO055_EULER_H_MSB_ADDR);		//Access LSB of Heading Euler angle
+		i2c_rep_start(BNO055_ADDRESS | I2C_READ);		//Set device address and read mode
+		Euler_Raw_MSB = i2c_readNak();
+		i2c_stop();
+
+		int16_t Euler_H_Raw = (Euler_Raw_MSB << 8) | (Euler_Raw_LSB);
+
+		yawAngle = (float)(Euler_H_Raw) * angle_scale;
+		//yawAngle = fabs(yawAngle - 180.0);
+		
+		//itoa(Euler_H, String_Data, 10);			//Convert integer to string, radix=10
+		//nRF_Put_String("Y: ");
+		//nRF_Put_String(String_Data);
+		
+		i2c_start_wait(BNO055_ADDRESS|I2C_WRITE);	//Set device address and read mode
+		i2c_write(BNO055_EULER_R_LSB_ADDR);		//Access LSB of Roll Euler angle
+		i2c_rep_start(BNO055_ADDRESS | I2C_READ);		//Set device address and read mode
+		Euler_Raw_LSB = i2c_readNak();
+		i2c_stop();
+
+		i2c_start_wait(BNO055_ADDRESS|I2C_WRITE);	//Set device address and read mode
+		i2c_write(BNO055_EULER_R_MSB_ADDR);		//Access MSB of Roll Euler angle
+		i2c_rep_start(BNO055_ADDRESS | I2C_READ);		//Set device address and read mode
+		Euler_Raw_MSB = i2c_readNak();
+		i2c_stop();
+
+		int16_t Euler_R_Raw = (Euler_Raw_MSB << 8) | (Euler_Raw_LSB);
+
+		rollAngle = (float)(Euler_R_Raw) * angle_scale;
+
+		//itoa(Euler_R, String_Data, 10);  //convert integer to string, radix=10
+		//nRF_Put_String(" R: ");
+		//nRF_Put_String(String_Data);
+
+		i2c_start_wait(BNO055_ADDRESS | I2C_WRITE);	//Set device address and read mode
+		i2c_write(BNO055_EULER_P_LSB_ADDR);		//Access LSB of Pitch Euler angle
+		i2c_rep_start(BNO055_ADDRESS | I2C_READ);		//Set device address and read mode
+		Euler_Raw_LSB = i2c_readNak();
+		i2c_stop();
+
+		i2c_start_wait(BNO055_ADDRESS | I2C_WRITE);	//Set device address and read mode
+		i2c_write(BNO055_EULER_P_MSB_ADDR);		//Access LSB of Pitch Euler angle
+		i2c_rep_start(BNO055_ADDRESS | I2C_READ);		//Set device address and read mode
+		Euler_Raw_MSB = i2c_readNak();
+		i2c_stop();
+
+		int16_t Euler_P_Raw = (Euler_Raw_MSB << 8) | (Euler_Raw_LSB);
+
+		pitchAngle = (float)(Euler_P_Raw) * angle_scale;
+		//SmoothDataPitch = SmoothDataPitch - (LPF_Beta * (SmoothDataPitch - pitchAngle));		
+		//pitchAngle = SmoothDataPitch;
+
+		i2c_start_wait(BNO055_ADDRESS|I2C_WRITE);	//Set device address and read mode
+		i2c_write(BNO055_LINEAR_ACCEL_DATA_X_LSB_ADDR);		//Access LSB of Heading Euler angle
+		i2c_rep_start(BNO055_ADDRESS | I2C_READ);		//Set device address and read mode
+		Linear_Raw_LSBx = i2c_readNak();
+		i2c_stop();
+
+		i2c_start_wait(BNO055_ADDRESS|I2C_WRITE);	//Set device address and read mode
+		i2c_write(BNO055_LINEAR_ACCEL_DATA_X_MSB_ADDR);		//Access LSB of Heading Euler angle
+		i2c_rep_start(BNO055_ADDRESS | I2C_READ);		//Set device address and read mode
+		Linear_Raw_MSBx = i2c_readNak();
+		i2c_stop();
+
+		int16_t Linear_X_Raw = (Linear_Raw_MSBx << 8) | (Linear_Raw_LSBx);
+		//int16_t Linear_X_Raw = (Linear_Raw_MSBx << 8) | (Linear_Raw_LSBx);
+		//int16_t Xforce = (Linear_Raw_MSBx << 8);
+		
+		i2c_start_wait(BNO055_ADDRESS|I2C_WRITE);	//Set device address and read mode
+		i2c_write(BNO055_LINEAR_ACCEL_DATA_Y_LSB_ADDR);		//Access LSB of Heading Euler angle
+		i2c_rep_start(BNO055_ADDRESS | I2C_READ);		//Set device address and read mode
+		Linear_Raw_LSBy = i2c_readNak();
+		i2c_stop();
+
+		i2c_start_wait(BNO055_ADDRESS|I2C_WRITE);	//Set device address and read mode
+		i2c_write(BNO055_LINEAR_ACCEL_DATA_Y_MSB_ADDR);		//Access LSB of Heading Euler angle
+		i2c_rep_start(BNO055_ADDRESS | I2C_READ);		//Set device address and read mode
+		Linear_Raw_MSBy = i2c_readNak();
+		i2c_stop();
+
+		int16_t Linear_Y_Raw = (Linear_Raw_MSBy << 8) | (Linear_Raw_LSBy);
+		//int16_t Linear_Y_Raw = (Linear_Raw_MSBy << 8) | (Linear_Raw_LSBy);
+		//int16_t Yforce = (Linear_Raw_MSBy << 8);
+		
+		pitchi1 = format_print_left((double) pitchAngle);
+		pitchi2 = format_print_right((double) pitchAngle);
+
+		rolli1 = format_print_left((double) rollAngle);
+		rolli2 = format_print_right((double) rollAngle);
+
+		yawi1 = format_print_left((double) yawAngle);
+		yawi2 = format_print_right((double) yawAngle);
+
+		//itoa(Euler_P, String_Data, 10);  //convert integer to string, radix=10	
+		//nRF_Put_String(" P: ");
+		//nRF_Put_String(String_Data);
+		//nRF_Put_String("\n");
+		
+		//loop_PID();
 			
-			stepperMotorTurn = 0;
-			stepperMotor2Turn = 0;
-			
-			mpu6050_readAccel();
-			mpu6050_readGyro();
-			
-			//accelxint = (int) ACCEL_XOUT_VALUE;
-			//accelyint = (int) ACCEL_YOUT_VALUE;
-			//accelzint = (int) ACCEL_ZOUT_VALUE;
-			accelxf1=floor(fabs(ACCEL_XOUT_VALUE));
-			accelxf2=fabs(ACCEL_XOUT_VALUE) - fabs(accelxf1);
-			
-			accelxi1 = (int)accelxf1;
-			accelxi2 = (int)100*accelxf2;
-			
-			accelyf1=floor(fabs(ACCEL_YOUT_VALUE));
-			accelyf2=fabs(ACCEL_YOUT_VALUE) - fabs(accelyf1);
-			
-			accelyi1 = (int)accelyf1;
-			accelyi2 = (int)100*accelyf2;
-			
-			accelzf1=floor(fabs(ACCEL_ZOUT_VALUE));
-			accelzf2=fabs(ACCEL_ZOUT_VALUE) - fabs(accelzf1);
-			
-			accelzi1 = (int)accelzf1;
-			accelzi2 = (int)100*accelzf2;
-			
-			pitchAngle = GYRO_YANGLE;
-			rollAngle = GYRO_XANGLE;
-			yawAngle = GYRO_ZANGLE;
-			
-			pitchf1=floor(pitchAngle);
-			pitchf2=pitchAngle - pitchf1;
-			
-			pitchi1 = (int)pitchf1;
-			pitchi2 = (int)100*pitchf2;
-			
-			rollf1=floor(rollAngle);
-			rollf2=rollAngle - rollf1;
-			
-			rolli1 = (int)rollf1;
-			rolli2 = (int)100*rollf2;
-			
-			yawf1=floor(yawAngle);
-			yawf2=yawAngle - yawf1;
-			
-			yawi1 = (int)yawf1;
-			yawi2 = (int)100*yawf2;
-			
-			deltapitchAngle = prevpitchAngle - pitchAngle;
-			deltarollAngle = prevrollAngle - rollAngle;
-			deltayawAngle = prevyawAngle - yawAngle;
-			
-			dpitchf1=floor(deltapitchAngle);
-			dpitchf2=deltapitchAngle - dpitchf1;
-			
-			dpitchi1 = (int)dpitchf1;
-			dpitchi2 = (int)100*dpitchf2;
-			
-			drollf1=floor(deltarollAngle);
-			drollf2=deltarollAngle - drollf1;
-			
-			drolli1 = (int)drollf1;
-			drolli2 = (int)100*drollf2;
-			
-			dyawf1=floor(deltayawAngle);
-			dyawf2=deltayawAngle - dyawf1;
-			
-			dyawi1 = (int)dyawf1;
-			dyawi2 = (int)100*dyawf2;
-			
-			/*
-			if(prevyawAngle < yawAngle && abs(dyawi2) > 10){
+		derPitchAng1 = format_print_left(deltapitchAngle);
+		derRollAng1 = format_print_left(derivativerollAngle);
+		derYawAng1 = format_print_left(deltayawAngle);
 				
-				stepperMotorTurn += 1;
-				stepperMotor2Turn -= 1;
+		derPitchAng2 = format_print_right(deltapitchAngle);
+		derRollAng2 = format_print_right(derivativerollAngle);
+		derYawAng2 = format_print_right(deltayawAngle);
+		
+		proPitchAng1 = format_print_left(proportionalpitchAngle);
+		proRollAng1 = format_print_left(proportionalrollAngle);
+		proYawAng1 = format_print_left(proportionalyawAngle);
+				
+		proPitchAng2 = format_print_right(proportionalpitchAngle);
+		proRollAng2 = format_print_right(proportionalrollAngle);
+		proYawAng2 = format_print_right(proportionalyawAngle);
 						
-			} else if(prevyawAngle > yawAngle && abs(dyawi2) > 10) {
-				
-				stepperMotorTurn -= 1;
-				stepperMotor2Turn += 1;
-				
-			}
-			
-			if(ACCEL_XOUT > 700){
-				
-				stepperMotorTurn += 1;
-				stepperMotor2Turn += 1;
-				PORTB |= (1<<3);
-							
-			} else if(ACCEL_XOUT < -700) {
-				
-				stepperMotorTurn -= 1;
-				stepperMotor2Turn -= 1;
-				PORTB |= (1<<3);
-				
-			} else {
-				PORTB &= ~(1<<3);
-			}
-			
-			
-			if(stepperMotorTurn > 0){
-				NODE_NEEDLE = NODE_NEEDLE->next;
-				stepper_turnMotor();
-			} else if(stepperMotorTurn < 0){
-				NODE_NEEDLE = NODE_NEEDLE->prev;
-				stepper_turnMotor();
-			} else {
-				stepper_stopMotor();
-			}
-			
-			if(stepperMotor2Turn > 0){
-				NODE_NEEDLE2 = NODE_NEEDLE2->next;
-				stepper_turnMotor2();
-			} else if(stepperMotor2Turn < 0){
-				NODE_NEEDLE2 = NODE_NEEDLE2->prev;
-				stepper_turnMotor2();
-			} else {
-				stepper_stopMotor2();
-			}
-			*/
+		//int addRollder1 = format_print_left(derivativerollAngle);
+		//int addRollder2 = format_print_right(derivativerollAngle);
 						
-			prevpitchAngle = pitchAngle;
-			prevrollAngle = rollAngle;
-			prevyawAngle = yawAngle;
-			
-			timer2tick = false;
-		}
-					
+		pidrolli1 = format_print_left(pidRollThreshold);
+		pidrolli2 = format_print_right(pidRollThreshold);
+				
+		RawDatax = Linear_X_Raw;
+		SmoothDatax = SmoothDatax - (LPF_Beta * (SmoothDatax - RawDatax));		
+				
+		int smoothedDatax1 = format_print_left(SmoothDatax);
+		int smoothedDatax2 = format_print_right(SmoothDatax);
+		
+		RawDatay = Linear_Y_Raw;
+		SmoothDatay = SmoothDatay - (LPF_Beta * (SmoothDatay - RawDatay));
+		
+		int smoothedDatay1 = format_print_left(SmoothDatay);
+		int smoothedDatay2 = format_print_right(SmoothDatay);
+		
+		derSmoothx = SmoothDatax - prevSmoothx;
+		derSmoothy = SmoothDatay - prevSmoothy;
+		
+		int derSmoothy1 = format_print_left(derSmoothy);
+		int derSmoothy2 = format_print_right(derSmoothy);
+				
+		int intRollAng1 = format_print_left(integralrollAngle);
+		int intRollAng2 = format_print_right(integralrollAngle);
+		
+		int intYawAng1 = format_print_left(integralyawAngle);
+		int intYawAng2 = format_print_right(integralyawAngle);
+		
+		int intYaw = (int) yawAngle;
+		
+		
 		if((UCSR0A & (1<<RXC0))){
-							
+			
 			c = USART_receive();
-							
+			
 			if(c == '0'){
-				
-				//sprintf(accelChar,"X:%d.%d Y:%d.%d Z:%d.%d...", accelxi1,accelxi2,accelyi1,accelyi2,accelzi1,accelzi2);
-				sprintf(accelChar,"X:%d Y:%d Z:%d...", ACCEL_XOUT_VALUE,ACCEL_YOUT_VALUE,ACCEL_ZOUT_VALUE);
+				////sprintf(accelChar,"pitch:%d.%d roll:%d.%d yaw:%d.%d X:%d Y:%d pidR:%d.%d...", pitchi1,pitchi2,rolli1,rolli2,yawi1,yawi2,Linear_X_Raw,Linear_Y_Raw,pidrolli1,pidrolli2);
+				//sprintf(accelChar,"%d %d.%d %d.%d ...", intYaw, derYawAng1,derYawAng2,intYawAng1,intYawAng2);
 				USART_putstring(accelChar);
-				
 			} else if(c == '1'){
-				
-				sprintf(gyroChar,"pitch: %d.%d roll:%d.%d yaw:%d.%d...", pitchi1,pitchi2,rolli1,rolli2,yawi1,yawi2);
-				USART_putstring(gyroChar);
-				
-			} else if(c == '2'){
-			
-				sprintf(dgyroChar,"dpitch: %d.%d droll:%d.%d dyaw:%d.%d...", dpitchi1,dpitchi2,drolli1,drolli2,dyawi1,dyawi2);
-				USART_putstring(dgyroChar);
-			
-			} else if(c == '3'){
-			
-				sprintf(accelChar,"X:%d Y:%d Z:%d P:%d.%d R:%d.%d Y:%d.%d...", ACCEL_XOUT_VALUE,ACCEL_YOUT_VALUE,ACCEL_ZOUT_VALUE,pitchi1,pitchi2,rolli1,rolli2,yawi1,yawi2);
+				//sprintf(accelChar,"%d.%d %d.%d %d.%d %d %d %d.%d ...", pitchi1,pitchi2,rolli1,rolli2,yawi1,yawi2,Linear_X_Raw,Linear_Y_Raw,pidrolli1,pidrolli2);
 				USART_putstring(accelChar);
-			
-			}
-			/*
-			else if(c == 'u'){
-				pwmMotA = pwmMotA + 100;
-				pwmMotB = pwmMotB + 100;
-				OCR1A = pwmMotA;
-				OCR1B = pwmMotB;
+			} else if(c == '2'){
+				//sprintf(accelChar,"%d.%d %d.%d %d.%d %d.%d %d.%d %d.%d %d.%d ...", pitchi1,pitchi2,rolli1,rolli2,yawi1,yawi2,proRollAng1,proRollAng2,derRollAng1,derRollAng2,intRollAng1,intRollAng2,pidrolli1,pidrolli2);
+				USART_putstring(accelChar);
+			} else if(c == '3'){
+				//sprintf(accelChar,"%d.%d %d.%d ...", smoothedDatay1,smoothedDatay2,derSmoothy1,derSmoothy2);
+				USART_putstring(accelChar);
+			} else if(c == '4'){
+				sprintf(accelChar,"%d %d %d %d...", pwmMotA,pwmMotB, pwm1, pwm2);
+				USART_putstring(accelChar);
+			} else if(c == 'u'){
+				targetpwmMotA = targetpwmMotA + 50;
+				targetpwmMotB = targetpwmMotB + 50;
+			} else if(c == 'y'){
+				targetpwmMotA = targetpwmMotA + 50;
+			} else if(c == 'h'){
+				targetpwmMotA = targetpwmMotA - 50;
+			} else if(c == 'i'){
+				targetpwmMotB = targetpwmMotB + 50;
+			} else if(c == 'k'){
+				targetpwmMotB = targetpwmMotB - 50;
 			} else if(c == 'd'){
-				pwmMotA = pwmMotA - 100;
-				pwmMotB = pwmMotB - 100;
-				OCR1A = pwmMotA;
-				OCR1B = pwmMotB;
+				targetpwmMotA = targetpwmMotA - 50;
+				targetpwmMotB = targetpwmMotB - 50;
+			} else if(c == 's'){
+				targetpwmMotA = 0;
+				targetpwmMotB = 0;
+			} else if(c =='z') {
+				pwm1 -= 1;
+				pwm2 += 1;
+			} else if(c == 'x'){
+				pwm1 += 1;
+				pwm2 -= 1;
 			}
-			*/
-			//USART_send(c);
 		}
 		
+		
+		/*
+		
+		prevpitchAngle = pitchAngle;
+		prevrollAngle = rollAngle;
+		prevyawAngle = yawAngle;
+		
+		prevSmoothx = SmoothDatax;
+		prevSmoothy = SmoothDatay;
+		
+		
+		*/
+		
+		//armCount = 0;
+		
+		
 	}
+}
+
+ISR (TIMER2_COMPA_vect)
+{
+	
+	
+	if(ovr > pwm1){
+		PORTD |= (1<<5);
+	}
+	
+	if(ovr > pwm2){
+		PORTD |= (1<<6);
+	}
+		
+	if(ovr > 799){
+		PORTD &= ~(1<<5);
+		PORTD &= ~(1<<6);
+		ovr = 0;
+		//pidCount++;
+	}
+	
+	ovr++;
 }
